@@ -80,6 +80,30 @@ SUPABASE_URL           = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY           = os.getenv("SUPABASE_KEY", "")
 
 # ── Message templates ──────────────────────────────────────────────────────
+_template_cache = {}
+
+def get_template(key: str, default: str) -> str:
+    """
+    Fetch a message template from Supabase.
+    Falls back to the hardcoded default if not found.
+    Caches templates for 5 minutes to avoid excessive DB calls.
+    """
+    import time
+    cache_key = f"tpl_{key}"
+    cached = _template_cache.get(cache_key)
+    if cached and time.time() - cached[1] < 300:
+        return cached[0]
+    try:
+        from data_store import _db
+        res = _db().table("message_templates").select("content").eq("key", key).single().execute()
+        if res.data and res.data.get("content"):
+            _template_cache[cache_key] = (res.data["content"], time.time())
+            return res.data["content"]
+    except Exception:
+        pass
+    return default
+
+
 GROUP_CHECKIN_MSG = """Hey everyone! 👋✨
 
 It's check-in day! 📝
@@ -319,13 +343,13 @@ def job_onboarding_new_client(client: dict):
     dest = _client_dest(client)
 
     # 1 — Welcome message
-    msg1 = ONBOARDING_WELCOME_MSG.format(first_name=first)
+    msg1 = get_template("onboarding_welcome", ONBOARDING_WELCOME_MSG).format(first_name=first)
     ok1  = send_whatsapp(dest, msg1)
     results.append(("Welcome message", ok1))
     time.sleep(2)
 
     # 2 — What to expect
-    msg2 = ONBOARDING_WHAT_TO_EXPECT_MSG.format(
+    msg2 = get_template("onboarding_what_to_expect", ONBOARDING_WHAT_TO_EXPECT_MSG).format(
         first_name=first, total_days=total_d
     )
     ok2 = send_whatsapp(dest, msg2)
@@ -438,8 +462,9 @@ def job_daily_video_drip():
             continue
 
         video_url = drip_videos.get(day_number, "")
-        template  = DAILY_VIDEO_TEMPLATES[idx]
-        msg       = template.format(
+        default_tpl = DAILY_VIDEO_TEMPLATES[idx]
+        template    = get_template(f"daily_video_{day_number}", default_tpl)
+        msg         = template.format(
             first_name=client["name"].split()[0],
             url=video_url,
         )
@@ -473,7 +498,7 @@ def job_group_checkin_reminder():
 
     # 1 — Send group reminder message
     if GROUP_NUMBER:
-        ok = send_whatsapp(GROUP_NUMBER, GROUP_CHECKIN_MSG)
+        ok = send_whatsapp(GROUP_NUMBER, get_template("group_checkin", GROUP_CHECKIN_MSG).format(first_name="everyone"))
         log_event(
             event_type="group_reminder",
             description=f"Group check-in reminder sent (Week {current_week})",
@@ -510,14 +535,11 @@ def job_group_checkin_reminder():
 
             weekly_url, _ = _build_form_links(client, current_week)
             first = client["name"].split()[0]
-            msg = (
-                f"Hi {first}! \n\n"
-                f"It's check-in day! Here's your Week {current_week} progress form "
-                f"— tap the link and fill in your measurements. Takes 2 minutes:\n\n"
-                f"{weekly_url}\n\n"
-                f"Please fill this today so I can track your progress!\n"
-                f"— Your Coach"
-            )
+            form_tpl = get_template("weekly_form_link",
+                "Hi {first_name}! \n\nIt's check-in day! Here's your Week {week} progress form "
+                "— tap the link and fill in your measurements. Takes 2 minutes:\n\n{url}\n\n"
+                "Please fill this today so I can track your progress!\n— Your Coach")
+            msg = form_tpl.format(first_name=first, week=current_week, url=weekly_url)
             # Send form link to client's personal group
             dest = _client_dest(client)
             ok = send_whatsapp(dest, msg)
@@ -564,7 +586,7 @@ def job_personal_dm_followup():
             log.info(f"  Skipping {client['name']} — DM already sent this week")
             continue
 
-        msg = PERSONAL_DM_TEMPLATE.format(
+        msg = get_template("personal_dm", PERSONAL_DM_TEMPLATE).format(
             first_name=client["name"].split()[0],
             week=current_week,
         )
@@ -613,7 +635,7 @@ def job_inactivity_check():
             if flag_exists(today_key):
                 continue
 
-            msg = INACTIVITY_TEMPLATE.format(
+            msg = get_template("inactivity", INACTIVITY_TEMPLATE).format(
                 first_name=client["name"].split()[0],
                 days=days_inactive,
             )
@@ -657,7 +679,7 @@ def job_resource_delivery():
         lines.append(f"{icon} {r['name']}: {content}")
 
     resource_list = "\n".join(lines)
-    msg = RESOURCE_GROUP_TEMPLATE.format(week=current_week, resource_list=resource_list)
+    msg = get_template("resource_delivery", RESOURCE_GROUP_TEMPLATE).format(week=current_week, resource_list=resource_list)
 
     if GROUP_NUMBER:
         ok = send_whatsapp(GROUP_NUMBER, msg)
